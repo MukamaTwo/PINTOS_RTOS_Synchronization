@@ -30,6 +30,10 @@ static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
 static void real_time_delay (int64_t num, int32_t denom);
 
+/*Lab2 Task1: */
+static struct list sleep_list;
+bool thread_wake_order(const struct list_elem* one,const struct list_elem* two,void* aux);
+
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
    and registers the corresponding interrupt. */
 void
@@ -37,6 +41,7 @@ timer_init (void)
 {
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
+  list_init(&sleep_list);    /*initialise the sleep_list*/
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -58,6 +63,7 @@ timer_calibrate (void)
     }
 
   /* Refine the next 8 bits of loops_per_tick. */
+
   high_bit = loops_per_tick;
   for (test_bit = high_bit >> 1; test_bit != high_bit >> 10; test_bit >>= 1)
     if (!too_many_loops (high_bit | test_bit))
@@ -89,11 +95,28 @@ timer_elapsed (int64_t then)
 void
 timer_sleep (int64_t ticks) 
 {
-  int64_t start = timer_ticks ();
+  
+if(ticks <=0)
+{
+return;
+}
+  
+int64_t start = timer_ticks ();
 
-  ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
+ASSERT (intr_get_level () == INTR_ON);
+
+ /*to block a thread, disable interrupts and enable them again after blocking*/
+  
+  enum intr_level old_level=intr_disable();
+
+  struct thread *current_thrd =  thread_current();
+  current_thrd->sleep_time = start + ticks;
+  /*insert the list to sleep_list in ordered order of sleep_time*/
+  list_insert_ordered(&sleep_list,&current_thrd->elem,&thread_wake_order,NULL);
+  thread_block();
+
+  intr_set_level (old_level);
+
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -124,6 +147,7 @@ timer_nsleep (int64_t ns)
    not be turned on.
 
    Busy waiting wastes CPU cycles, and busy waiting with
+   interrupts off for the interval between timer ticks or longer
    interrupts off for the interval between timer ticks or longer
    will cause timer ticks to be lost.  Thus, use timer_msleep()
    instead if interrupts are enabled. */
@@ -165,14 +189,30 @@ timer_print_stats (void)
 {
   printf ("Timer: %"PRId64" ticks\n", timer_ticks ());
 }
-
+
 /* Timer interrupt handler. */
 static void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
+ struct thread *thrd;
+
+  /*remove and unblock sleeping threads whose sleep_time <= ticks*/
+  while(!list_empty(&sleep_list))
+  {
+    thrd = list_entry(list_begin(&sleep_list),struct thread,elem);
+    if(thrd->sleep_time <= ticks)
+    {
+      list_remove(&thrd->elem);
+      thread_unblock(thrd);
+    }
+    else break;
+  }
+
   thread_tick ();
+
 }
+
 
 /* Returns true if LOOPS iterations waits for more than one timer
    tick, otherwise false. */
@@ -241,6 +281,11 @@ real_time_delay (int64_t num, int32_t denom)
 {
   /* Scale the numerator and denominator down by 1000 to avoid
      the possibility of overflow. */
-  ASSERT (denom % 1000 == 0);
   busy_wait (loops_per_tick * num / 1000 * TIMER_FREQ / (denom / 1000)); 
+}
+
+/*enters sleeping threads in order of sleep_time value*/
+bool thread_wake_order(const struct list_elem* one,const struct list_elem* two,void* aux UNUSED)
+{
+  return list_entry(one,struct thread,elem)->sleep_time < list_entry(two,struct thread,elem)->sleep_time;
 }
